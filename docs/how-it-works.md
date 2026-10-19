@@ -4,40 +4,65 @@ A deeper look at the internals of the `continue` plugin.
 
 ## Event flow
 
-The plugin hooks three opencode events:
+The plugin subscribes to the OpenCode 2 event stream:
 
 ```
-chat.params ──────► learn which agent the session is on (stored per session)
-session.idle ─────► the main loop: maybe send a continuation prompt
-session.deleted ──► drop the session's state
+session.execution.succeeded ──► the main loop: maybe send a continuation prompt
+session.idle ─────────────────► same handler (accepted as a fallback)
+session.deleted ──────────────► drop the session's state
 ```
 
-### `chat.params`
+There is no `chat.params` hook. The agent is read from the session itself when
+the completion event arrives.
 
-Fires on every prompt. The plugin uses it only to record which agent the session is currently running under:
+### Agent gate
+
+On a completion event, the plugin reads the session:
 
 ```ts
-"chat.params": async (input) => {
-  const s = state(input.sessionID)
-  s.agent = input.agent
-}
+const session = await ctx.session.get({ sessionID })
 ```
 
-The model field is deliberately ignored — that's what keeps model switching (Ctrl+P) safe.
+It then reads the stored conversation:
 
-### `session.idle`
+```ts
+const messages = await ctx.session.context({ sessionID })
+```
 
-The heart of the plugin. When a session goes quiet, the plugin walks a series of gates in order:
+The effective agent is `session.agent`, falling back to the `agent` field on the
+last assistant message. If it isn't `SCOPED_AGENT`, the plugin returns
+immediately. This means switching away from the solver stops the loop at the
+next completion event.
 
-1. **Agent gate** — `s.agent !== SCOPED_AGENT` → ignore. Only the configured agent is ever driven.
-2. **Stacking gate** — `s.running` → ignore. A continuation is already in flight.
-3. **Cap gate** — `s.iterations >= MAX` → ignore. Hard stop.
-4. **Fetch** — pull the session's messages from the client API; bail if empty or failed.
-5. **Last assistant turn** — find the most recent assistant message.
-6. **Error gate** — if that turn errored or was aborted, never re-prompt. Fighting an error just loops it.
-7. **De-dup gate** — if this message ID was already handled, ignore. Prevents double-firing on repeated idle events.
-8. **Marker check** — if the reply's last non-empty line is `JOB COMPLETED`, log and reset the counter. Done.
-9. **Continue** — otherwise, wait `COOLDOWN_MS`, then send the continuation prompt under the same agent.
+Global plugins are instantiated once per location. The plugin also compares the
+session's `projectID` with `ctx.location.project.id` so only the instance for
+the session's project acts; otherwise two instances would send two prompts.
+
+### Completion handler
+
+The heart of the plugin. When a turn finishes, the plugin walks a series of
+gates in order:
+
+1. **Stacking gate** — `s.running` → ignore. A continuation is already in flight.
+2. **Cap gate** — `s.iterations >= MAX` → ignore. Hard stop.
+3. **Session read** — pull the session; bail if the read fails.
+4. **Project gate** — only the plugin instance for the session's project acts.
+5. **Outcome gate** — if the trailing idle message reports `failed` or
+   `interrupted`, never re-prompt.
+6. **Last assistant turn** — find the most recent `assistant` message.
+7. **Agent gate** — effective agent isn't `solver` → ignore. Only the configured
+   agent is ever driven.
+8. **Error gate** — if that turn has an `error` or `finish === "error"`, never
+   re-prompt. Fighting an error just loops it.
+9. **De-dup gate** — if this message ID was already handled, ignore. Prevents
+   double-firing on repeated completion events.
+10. **Marker check** — if the reply's last non-empty line is `JOB COMPLETED`, log
+    and reset the counter. Done.
+11. **Continue** — otherwise, wait `COOLDOWN_MS`, then send the continuation
+    prompt with `ctx.session.prompt({ sessionID, text })`.
+
+Because `session.prompt` does not take an agent, the session keeps the agent it
+already has. The agent gate guarantees that is `solver`.
 
 ### `session.deleted`
 
@@ -50,15 +75,16 @@ Drops the session's state so the map doesn't grow unbounded.
   iterations: number      // continuations sent this run (reset on done)
   running: boolean        // a continuation prompt is in flight
   seen: Set<string>       // assistant message IDs already handled
-  agent?: string          // last agent seen via chat.params
 }
 ```
 
-State lives in a `Map<sessionID, …>` inside the plugin closure — no files, no external storage.
+State lives in a `Map<sessionID, …>` inside the plugin closure — no files, no
+external storage.
 
 ## Marker semantics
 
-`isDone()` splits the reply on newlines, trims each line, drops empties, and checks whether the **last** remaining line exactly equals `MARKER`.
+`isDone()` splits the reply on newlines, trims each line, drops empties, and
+checks whether the **last** remaining line exactly equals `MARKER`.
 
 ```
 "…all tests pass.\nJOB COMPLETED"      → done
@@ -66,7 +92,8 @@ State lives in a `Map<sessionID, …>` inside the plugin closure — no files, n
 "JOB COMPLETED"                        → done
 ```
 
-Requiring the marker as the final line means the model has to commit to it — a passing mention mid-sentence can't end the run.
+Requiring the marker as the final line means the model has to commit to it — a
+passing mention mid-sentence can't end the run.
 
 ## Why each gate exists
 
@@ -75,13 +102,13 @@ Requiring the marker as the final line means the model has to commit to it — a
 | Agent gate | Driving sessions you didn't intend (e.g. a casual chat) |
 | Stacking gate | Two idle events racing → two prompts → context bloat |
 | Cap gate | A model that never emits the marker burning tokens forever |
-| Error gate | Re-prompting an aborted/errored turn into a loop |
+| Outcome/error gate | Re-prompting an aborted/errored turn into a loop |
 | De-dup gate | The same turn triggering multiple continuations |
 | Cooldown | Hammering the API the instant idle fires |
 
 ## Extension ideas
 
-- **Custom markers per agent** — make `MARKER` a config option read from `opencode.json`.
+- **Custom markers per agent** — make `MARKER` a plugin option read from `ctx.options`.
 - **Per-agent scoping** — drive multiple agents, each with its own cap and marker.
 - **Progress logging** — emit a `console.log` per continuation with a short summary of the last turn.
 - **Idle timeout** — stop the loop if the session stays idle for N minutes even without the marker.

@@ -1,17 +1,19 @@
-  "agent": {
+  "agents": {
     "solver": {
-      "name": "solver",
       "description": "Autonomous problem solver for long-running open-ended tasks",
       "model": "llama-local/qwen3.8-27b",
       "mode": "primary",
       "color": "#3fb950",
       "steps": 400,
-      "prompt": "You are a research engineer, work the task step by step and do not stop to ask questions. Decide and proceed.",
-      "temperature": 0.3,
-      "permission": {
-        "*": "allow",
-        "doom_loop": "ask"
-      }
+      "system": "You are a research engineer, work the task step by step and do not stop to ask questions. Decide and proceed.",
+      "request": {
+        "body": {
+          "temperature": 0.3
+        }
+      },
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "allow" },
+        { "action": "doom_loop", "resource": "*", "effect": "ask" }
+      ]
     }
   }
-

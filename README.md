@@ -1,18 +1,18 @@
 # continue
 
-Auto-continues an [opencode](https://opencode.ai) agent until it declares the job done.
+Auto-continues an [OpenCode 2](https://opencode.ai) agent until it declares the job done.
 
-Point a long-running task at a scoped agent, and `continue` keeps nudging it forward one "don't give up, continue where you left off" prompt at a time, until the agent ends its reply with the exact line `JOB COMPLETED`. This is particularly useful to have a single agent work at a problem for long periods of time without interruptions. The plugin was build with Qwen 3.8 27B local model in mind. 
+Point a long-running task at a scoped agent, and `continue` keeps nudging it forward one "don't give up, continue where you left off" prompt at a time, until the agent ends its reply with the exact line `JOB COMPLETED`. This is particularly useful to have a single agent work at a problem for long periods of time without interruptions. The plugin was built with Qwen 3.8 27B local models in mind.
 
 ## How it works
 
 ```
-session.idle ──► is this the solver agent? ──► did the last reply end with JOB COMPLETED?
+session done ──► is this the solver agent? ──► did the last reply end with JOB COMPLETED?
                      │ no → ignore                       │ yes → reset, stop
                      └──► send "Continue where you left off…"
 ```
 
-1. **Watches `session.idle`** — when a session goes quiet, the plugin checks the last assistant reply.
+1. **Watches for turn completion** — on `session.execution.succeeded` (or `session.idle` when emitted), the plugin checks the last assistant reply.
 2. **Scoped to one agent** — by default only the `solver` agent is driven; every other session is ignored.
 3. **Marker detection** — the run ends only when `JOB COMPLETED` is the *last non-empty line* of the reply, so the model can't trip it by mentioning the phrase mid-sentence.
 4. **Bounded** — a hard cap of 25 continuations, a 2s cooldown between prompts, and no stacking while a prompt is in flight.
@@ -25,44 +25,62 @@ session.idle ──► is this the solver agent? ──► did the last reply en
 | `COOLDOWN_MS = 2000` | Pause between the idle event and the next prompt |
 | `running` flag | Never stacks a prompt on top of an in-flight one |
 | `seen` set | De-duplicates the same assistant turn |
-| Error check | Never re-prompts after an errored or aborted turn |
+| Error/outcome check | Never re-prompts after an errored, aborted, or interrupted turn |
 | Agent gate | Only drives the configured agent — your other sessions are untouched |
 
-The plugin is deliberately **model-agnostic**: it never touches the model field, so you can switch models mid-session (Ctrl+P) without breaking the loop.
+The plugin is deliberately **model-agnostic**: it never touches the model field, so you can switch models mid-session without breaking the loop.
 
 ## Install
 
-1. Copy `plugin/continue.ts` into your opencode project:
+OpenCode 2 discovers `.ts` files under `.opencode/plugins/`. Copy the plugin there:
 
-   ```sh
-   mkdir -p .opencode/plugin
-   cp plugin/continue.ts .opencode/plugin/
-   ```
+```sh
+# per project
+mkdir -p .opencode/plugins
+cp plugin/continue.ts .opencode/plugins/
 
-2. Add the agent to your `opencode.json` (see [`plugin/agent.txt`](plugin/agent.txt)):
+# or globally
+mkdir -p ~/.config/opencode/plugins
+cp plugin/continue.ts ~/.config/opencode/plugins/
+```
 
-   ```json
-   {
-     "agent": {
-       "solver": {
-         "name": "solver",
-         "description": "Autonomous problem solver for long-running open-ended tasks",
-         "model": "llama-local/qwen3.8-27b",
-         "mode": "primary",
-         "color": "#3fb950",
-         "steps": 400,
-         "prompt": "You are a research engineer, work the task step by step and do not stop to ask questions. Decide and proceed.",
-         "temperature": 0.3,
-         "permission": {
-           "*": "allow",
-           "doom_loop": "ask"
-         }
-       }
-     }
-   }
-   ```
+OpenCode 2's `plugins` config accepts plugin *directories*, not individual
+`.ts` files. If you keep developing this checkout, copy the file again after
+edits:
 
-3. Start a session with the `solver` agent and give it your task. It will keep going until it finishes or hits the cap.
+```sh
+npm run deploy
+```
+
+## Agent
+
+Add the `solver` agent to your `opencode.json(c)` using the native V2 shape:
+
+```jsonc
+{
+  "agents": {
+    "solver": {
+      "description": "Autonomous problem solver for long-running open-ended tasks",
+      "model": "llama-local/qwen3.8-27b",
+      "mode": "primary",
+      "color": "#3fb950",
+      "steps": 400,
+      "system": "You are a research engineer, work the task step by step and do not stop to ask questions. Decide and proceed.",
+      "request": {
+        "body": {
+          "temperature": 0.3
+        }
+      },
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "allow" },
+        { "action": "doom_loop", "resource": "*", "effect": "ask" }
+      ]
+    }
+  }
+}
+```
+
+Start a session with the `solver` agent and give it your task. It will keep going until it finishes or hits the cap.
 
 ## Configuration
 
@@ -88,6 +106,9 @@ The plugin stops prompting and the session simply goes idle. The counter resets 
 
 **Does it interfere with my other sessions?**
 No. Anything that isn't running under the scoped agent is ignored entirely.
+
+**Does it work on OpenCode 1?**
+No. This version targets the OpenCode 2 plugin API (`Plugin.define` with `setup(ctx)` and `ctx.event.subscribe`). Use the previous release for OpenCode 1.
 
 ## Docs
 
