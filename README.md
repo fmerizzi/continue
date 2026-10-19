@@ -22,7 +22,7 @@ session done ──► is this the solver agent? ──► did the last reply en
 | Gate | What it does |
 | --- | --- |
 | `MAX = 25` | Hard stop after 25 continuations per session |
-| `COOLDOWN_MS = 2000` | Pause between the idle event and the next prompt |
+| `COOLDOWN_MS = 2000` | Pause between the completion event and the next prompt |
 | `running` flag | Never stacks a prompt on top of an in-flight one |
 | `seen` set | De-duplicates the same assistant turn |
 | Error/outcome check | Never re-prompts after an errored, aborted, or interrupted turn |
@@ -30,27 +30,42 @@ session done ──► is this the solver agent? ──► did the last reply en
 
 The plugin is deliberately **model-agnostic**: it never touches the model field, so you can switch models mid-session without breaking the loop.
 
+## Footer status
+
+The TUI half shows the active solver run in the prompt footer, immediately to
+the right of the TPS meter:
+
+| Display | Meaning |
+| --- | --- |
+| `● 0/25` | Solver is generating (green dot) |
+| `● 3/25` | Waiting between continuations (yellow dot) |
+| `● ✓` | `JOB COMPLETED` reached (cyan dot) |
+| `● 25/25` | Continuation cap reached (red dot) |
+
+The status is hidden for every session that is not running the `solver` agent.
+
 ## Install
 
-OpenCode 2 discovers `.ts` files under `.opencode/plugins/`. Copy the plugin there:
+OpenCode 2 discovers `.ts` files under `.opencode/plugins/`, and TUI plugins use
+the package layout with a `tui` entrypoint. Copy both halves:
 
 ```sh
 # per project
-mkdir -p .opencode/plugins
+mkdir -p .opencode/plugins/continue-tui
 cp plugin/continue.ts .opencode/plugins/
-
-# or globally
-mkdir -p ~/.config/opencode/plugins
-cp plugin/continue.ts ~/.config/opencode/plugins/
+cp plugin/tui.tsx .opencode/plugins/continue-tui/
+cp plugin/tui-package.json .opencode/plugins/continue-tui/package.json
 ```
 
-OpenCode 2's `plugins` config accepts plugin *directories*, not individual
-`.ts` files. If you keep developing this checkout, copy the file again after
-edits:
+Or globally, from this checkout:
 
 ```sh
 npm run deploy
 ```
+
+`deploy` installs the server plugin at
+`~/.config/opencode/plugins/continue.ts` and the TUI package at
+`~/.config/opencode/plugins/continue-tui/`.
 
 ## Agent
 

@@ -1,18 +1,26 @@
 {
   "name": "continue-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Auto-continues an OpenCode 2 agent until it declares the job done",
   "license": "MIT",
   "type": "module",
   "engines": {
     "opencode": ">=2.0.0"
   },
+  "exports": {
+    ".": "./plugin/continue.ts",
+    "./tui": "./plugin/tui.tsx"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "deploy": "cp plugin/continue.ts \"$HOME/.config/opencode/plugins/continue.ts\""
+    "deploy": "cp plugin/continue.ts \"$HOME/.config/opencode/plugins/continue.ts\" && mkdir -p \"$HOME/.config/opencode/plugins/continue-tui\" && cp plugin/tui.tsx \"$HOME/.config/opencode/plugins/continue-tui/tui.tsx\" && cp plugin/tui-package.json \"$HOME/.config/opencode/plugins/continue-tui/package.json\""
   },
   "devDependencies": {
     "@opencode/plugin": "2.0.32",
+    "@opencode/theme": "^2.0.32",
+    "@opentui/core": "^0.6.6",
+    "@opentui/solid": "^0.6.6",
+    "solid-js": "^1.9.17",
     "typescript": "^5"
   }
 }

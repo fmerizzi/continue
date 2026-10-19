@@ -106,6 +106,29 @@ passing mention mid-sentence can't end the run.
 | De-dup gate | The same turn triggering multiple continuations |
 | Cooldown | Hammering the API the instant idle fires |
 
+## TUI status
+
+The TUI half lives in `plugin/tui.tsx` and is a separate `@opencode/plugin/tui`
+entrypoint. It never talks to the server plugin directly; it derives everything
+from the session data available to the TUI:
+
+- **Agent gate** — `session.agent`, falling back to the last assistant message's
+  `agent`. Anything other than `solver` renders nothing.
+- **Count** — user messages whose text starts with
+  `Continue where you left off.`, counted after the most recent real user
+  message. That is the same prompt the server plugin sends.
+- **Done** — the last assistant message's last non-empty line is
+  `JOB COMPLETED`.
+- **Running** — `ctx.data.session.status(sessionID) === "running"`.
+- **Cap** — `count >= 25`.
+
+The component subscribes to execution, inbox, agent, and status events and bumps
+a Solid signal so the footer refreshes after each transition. It registers at
+`before: "prompt.footer.file"` rather than `after: "prompt.footer.status"`.
+The TPS meter is an `after: "prompt.footer.status"` claim, so anchoring before
+the next footer sibling puts the continue status to its right without depending
+on plugin load order.
+
 ## Extension ideas
 
 - **Custom markers per agent** — make `MARKER` a plugin option read from `ctx.options`.
