@@ -9,11 +9,22 @@ The plugin subscribes to the OpenCode 2 event stream:
 ```
 session.execution.succeeded ──► the main loop: maybe send a continuation prompt
 session.idle ─────────────────► same handler (accepted as a fallback)
+session.execution.failed ─────► log the terminal error, no retry
+session.execution.interrupted ► log the reason, no retry
 session.deleted ──────────────► drop the session's state
 ```
 
 There is no `chat.params` hook. The agent is read from the session itself when
 the completion event arrives.
+
+### Terminal failures
+
+`session.execution.failed` carries a structured error (`type`, `message`,
+optional `status` and `response.body`). The plugin logs it and stops; it does
+not retry provider errors. `session.execution.interrupted` carries the reason
+(`user`, `inactivity`, `shutdown`, `superseded`); those are logged but never
+turned into a new prompt. OpenCode already retries transient stream errors
+before a turn is reported as failed.
 
 ### Agent gate
 
@@ -49,17 +60,23 @@ gates in order:
 4. **Project gate** — only the plugin instance for the session's project acts.
 5. **Outcome gate** — if the trailing idle message reports `failed` or
    `interrupted`, never re-prompt.
-6. **Last assistant turn** — find the most recent `assistant` message.
+6. **Current turn** — find the last `user` message and only look for an
+   `assistant` message *after* it. A previous assistant reply must not mask a
+   no-reply turn.
 7. **Agent gate** — effective agent isn't `solver` → ignore. Only the configured
    agent is ever driven.
-8. **Error gate** — if that turn has an `error` or `finish === "error"`, never
-   re-prompt. Fighting an error just loops it.
-9. **De-dup gate** — if this message ID was already handled, ignore. Prevents
-   double-firing on repeated completion events.
-10. **Marker check** — if the reply's last non-empty line is `JOB COMPLETED`, log
+8. **No assistant** — if the turn produced no assistant message, send the
+   recovery prompt. De-dup by the last user message ID.
+9. **Error gate** — if the assistant has an `error` or `finish === "error"`,
+   never re-prompt. Fighting an error just loops it.
+10. **De-dup gate** — if this assistant message ID was already handled, ignore.
+11. **Marker check** — if the reply's last non-empty line is `JOB COMPLETED`, log
     and reset the counter. Done.
-11. **Continue** — otherwise, wait `COOLDOWN_MS`, then send the continuation
-    prompt with `ctx.session.prompt({ sessionID, text })`.
+12. **Meaningful content** — if the assistant has no non-empty text, reasoning,
+    or tool part, use the recovery prompt. Otherwise use the normal continue
+    prompt.
+13. **Continue** — wait `COOLDOWN_MS`, then send the prompt with
+    `ctx.session.prompt({ sessionID, text })`.
 
 Because `session.prompt` does not take an agent, the session keeps the agent it
 already has. The agent gate guarantees that is `solver`.
@@ -74,7 +91,7 @@ Drops the session's state so the map doesn't grow unbounded.
 {
   iterations: number      // continuations sent this run (reset on done)
   running: boolean        // a continuation prompt is in flight
-  seen: Set<string>       // assistant message IDs already handled
+  seen: Set<string>       // assistant IDs and no-reply user IDs already handled
 }
 ```
 
@@ -103,6 +120,7 @@ passing mention mid-sentence can't end the run.
 | Stacking gate | Two idle events racing → two prompts → context bloat |
 | Cap gate | A model that never emits the marker burning tokens forever |
 | Outcome/error gate | Re-prompting an aborted/errored turn into a loop |
+| Empty-reply recovery | A completed turn that produced no usable output going silent |
 | De-dup gate | The same turn triggering multiple continuations |
 | Cooldown | Hammering the API the instant idle fires |
 
@@ -112,26 +130,40 @@ The TUI half lives in `plugin/tui.tsx` and is a separate `@opencode/plugin/tui`
 entrypoint. It never talks to the server plugin directly; it derives everything
 from the session data available to the TUI:
 
-- **Agent gate** — `session.agent`, falling back to the last assistant message's
-  `agent`. Anything other than `solver` renders nothing.
+- **Agent gate** — `session.agent`, falling back to the assistant after the last
+  user message. Anything other than `solver` renders nothing.
 - **Count** — user messages whose text starts with
   `Continue where you left off.`, counted after the most recent real user
   message. That is the same prompt the server plugin sends.
-- **Done** — the last assistant message's last non-empty line is
-  `JOB COMPLETED`.
+- **Done** — the assistant after the last user message ends with
+  `JOB COMPLETED`. A previous turn's marker cannot leak through.
 - **Running** — `ctx.data.session.status(sessionID) === "running"`.
 - **Cap** — `count >= 25`.
+- **Failed** — `execution.failed` sets a live per-session flag;
+  `execution.interrupted` sets it only for the `inactivity` reason. Historical
+  failures fall back to an assistant `error` or `finish === "error"`, except for
+  `aborted`, so a deliberate user abort stays quiet.
 
-The component subscribes to execution, inbox, agent, and status events and bumps
-a Solid signal so the footer refreshes after each transition. It registers at
-`before: "prompt.footer.file"` rather than `after: "prompt.footer.status"`.
+The component subscribes to execution, idle, inbox, agent, and status events and
+bumps a Solid signal so the footer refreshes after each transition. It registers
+at `before: "prompt.footer.file"` rather than `after: "prompt.footer.status"`.
 The TPS meter is an `after: "prompt.footer.status"` claim, so anchoring before
 the next footer sibling puts the continue status to its right without depending
 on plugin load order.
+
+There is no stall watchdog. A request that hangs with no events at all is not
+interrupted, so a slow model is never cut off.
+
+## Known failure visibility
+
+OpenCode retries transient stream errors internally. Only terminal failures are
+reported to the plugin. Those are logged and surfaced in the footer as `● !`;
+they are not retried. A session runner that dies without emitting an execution
+event is outside what the plugin can observe.
 
 ## Extension ideas
 
 - **Custom markers per agent** — make `MARKER` a plugin option read from `ctx.options`.
 - **Per-agent scoping** — drive multiple agents, each with its own cap and marker.
 - **Progress logging** — emit a `console.log` per continuation with a short summary of the last turn.
-- **Idle timeout** — stop the loop if the session stays idle for N minutes even without the marker.
+- **Stall watchdog** — optionally interrupt a run that produces no activity for N minutes. Omitted by design so slow models are never cut off.

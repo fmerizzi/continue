@@ -7,17 +7,6 @@ const MAX = 25
 const CONTINUE_PREFIX = "Continue where you left off."
 const SCOPED_AGENT = "solver"
 
-const EVENTS = [
-  "session.execution.started",
-  "session.execution.succeeded",
-  "session.execution.failed",
-  "session.execution.interrupted",
-  "session.inbox.enqueued",
-  "session.agent.selected",
-  "session.status",
-  "session.deleted",
-] as const
-
 type Assistant = Extract<SessionMessageInfo, { type: "assistant" }>
 
 type Status = {
@@ -25,6 +14,7 @@ type Status = {
   done: boolean
   running: boolean
   capped: boolean
+  failed: boolean
 }
 
 function isDone(text: string): boolean {
@@ -35,8 +25,16 @@ function isDone(text: string): boolean {
   return lines.length > 0 && lines[lines.length - 1] === MARKER
 }
 
-function lastAssistant(messages: SessionMessageInfo[]): Assistant | undefined {
+function lastUserIndex(messages: SessionMessageInfo[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].type === "user") return i
+  }
+  return -1
+}
+
+function lastAssistant(messages: SessionMessageInfo[]): Assistant | undefined {
+  const start = lastUserIndex(messages)
+  for (let i = messages.length - 1; i > start; i--) {
     const message = messages[i]
     if (message.type === "assistant") return message
   }
@@ -73,12 +71,54 @@ function continuationCount(messages: SessionMessageInfo[]): number {
 function StatusView(props: { sessionID?: string }) {
   const ctx = usePlugin()
   const [version, setVersion] = createSignal(0)
+  const [failures, setFailures] = createSignal<Record<string, true>>({})
 
   const bump = () => {
     // Let the client-side session store apply the event before we read it.
     setTimeout(() => setVersion((value) => value + 1), 0)
   }
-  const offs = EVENTS.map((type) => ctx.data.on(type, bump))
+
+  const setFailure = (sessionID: string, failed: boolean) => {
+    setFailures((previous) => {
+      if (failed) {
+        if (previous[sessionID]) return previous
+        return { ...previous, [sessionID]: true }
+      }
+      if (!previous[sessionID]) return previous
+      const next = { ...previous }
+      delete next[sessionID]
+      return next
+    })
+  }
+
+  const offs = [
+    ctx.data.on("session.execution.started", (event) => {
+      setFailure(event.data.sessionID, false)
+      bump()
+    }),
+    ctx.data.on("session.execution.succeeded", (event) => {
+      setFailure(event.data.sessionID, false)
+      bump()
+    }),
+    ctx.data.on("session.execution.failed", (event) => {
+      setFailure(event.data.sessionID, true)
+      bump()
+    }),
+    ctx.data.on("session.execution.interrupted", (event) => {
+      // A user abort stops the loop deliberately; only inactivity counts as a
+      // failed run for the footer.
+      setFailure(event.data.sessionID, event.data.reason === "inactivity")
+      bump()
+    }),
+    ctx.data.on("session.inbox.enqueued", bump),
+    ctx.data.on("session.agent.selected", bump),
+    ctx.data.on("session.status", bump),
+    ctx.data.on("session.idle", bump),
+    ctx.data.on("session.deleted", (event) => {
+      setFailure(event.data.sessionID, false)
+      bump()
+    }),
+  ]
   onCleanup(() => offs.forEach((off) => off()))
 
   const status = createMemo<Status | undefined>(() => {
@@ -94,14 +134,25 @@ function StatusView(props: { sessionID?: string }) {
 
     const count = continuationCount(messages)
     const done = isDone(assistantText(assistant))
+
+    // Live failures come from events because a failed turn may not persist an
+    // idle message. Historical failures fall back to the assistant record.
+    // "aborted" is excluded here so a deliberate user abort stays quiet.
+    const historicalFailure =
+      assistant?.error !== undefined
+        ? assistant.error.type !== "aborted"
+        : assistant?.finish === "error"
+
     return {
       count,
       done,
       running: ctx.data.session.status(sessionID) === "running",
       capped: count >= MAX && !done,
+      failed: failures()[sessionID] === true || historicalFailure,
     }
   })
 
+  const errorColor = () => ctx.theme.text.feedback?.error?.base ?? ctx.theme.text.base
   const color = (value: Status) => {
     const feedback = ctx.theme.text.feedback
     if (value.capped) return feedback?.error?.base ?? ctx.theme.text.base
@@ -114,8 +165,10 @@ function StatusView(props: { sessionID?: string }) {
     <Show when={status()} fallback={<box flexShrink={0} />}>
       {(value) => (
         <box flexDirection="row" flexShrink={0} gap={1}>
-          <text fg={color(value())}>●</text>
-          <text fg={ctx.theme.text.muted}>{value().done ? "✓" : `${value().count}/${MAX}`}</text>
+          <text fg={value().failed ? errorColor() : color(value())}>●</text>
+          <text fg={value().failed ? errorColor() : ctx.theme.text.muted}>
+            {value().failed ? "!" : value().done ? "✓" : `${value().count}/${MAX}`}
+          </text>
         </box>
       )}
     </Show>

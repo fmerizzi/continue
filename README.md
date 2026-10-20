@@ -26,6 +26,7 @@ session done ──► is this the solver agent? ──► did the last reply en
 | `running` flag | Never stacks a prompt on top of an in-flight one |
 | `seen` set | De-duplicates the same assistant turn |
 | Error/outcome check | Never re-prompts after an errored, aborted, or interrupted turn |
+| Empty-reply recovery | A completed turn with no assistant reply / no meaningful content gets one nudge |
 | Agent gate | Only drives the configured agent — your other sessions are untouched |
 
 The plugin is deliberately **model-agnostic**: it never touches the model field, so you can switch models mid-session without breaking the loop.
@@ -41,8 +42,36 @@ the right of the TPS meter:
 | `● 3/25` | Waiting between continuations (yellow dot) |
 | `● ✓` | `JOB COMPLETED` reached (cyan dot) |
 | `● 25/25` | Continuation cap reached (red dot) |
+| `● !` | The last execution failed, or timed out from inactivity (red) |
 
 The status is hidden for every session that is not running the `solver` agent.
+
+## Empty replies and failures
+
+If a turn completes successfully but leaves no assistant message after the last
+user message, or leaves only empty/whitespace content, the plugin sends a
+recovery nudge:
+
+```text
+Continue where you left off. Your previous reply produced no output.
+If you are stuck, explain the blocker and try a different approach.
+When the whole job is finished, end your reply with the exact line: JOB COMPLETED
+```
+
+That nudge counts toward the normal 25-attempt cap.
+
+Provider failures and interruptions are **not retried**:
+
+- `session.execution.failed` is logged with the error type, status, and message.
+- `session.execution.interrupted` is logged with its reason (`user`, `inactivity`,
+  `shutdown`, or `superseded`).
+- The footer shows `● !` for failures and inactivity timeouts.
+- User aborts leave the normal count in place.
+- Transient stream errors are already retried internally by OpenCode before a
+  turn is reported as failed.
+
+There is deliberately no stall watchdog, so slow models are never interrupted.
+A runner that hangs with no events at all is outside what this plugin can detect.
 
 ## Install
 
@@ -118,6 +147,9 @@ Yes. The plugin only pins the agent, never the model.
 
 **What happens when the cap is hit?**
 The plugin stops prompting and the session simply goes idle. The counter resets the next time the agent finishes a job.
+
+**What about model crashes?**
+Transient stream errors are retried internally by OpenCode. If those retries are exhausted, the turn is reported as failed: the plugin logs it, and the footer shows `● !`. The plugin does not retry provider errors itself, and it has no stall watchdog, so a runner that hangs with no events at all stays outside its control.
 
 **Does it interfere with my other sessions?**
 No. Anything that isn't running under the scoped agent is ignored entirely.
