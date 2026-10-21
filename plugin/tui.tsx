@@ -8,6 +8,7 @@ const CONTINUE_PREFIX = "Continue where you left off."
 const SCOPED_AGENT = "solver"
 
 type Assistant = Extract<SessionMessageInfo, { type: "assistant" }>
+type Idle = Extract<SessionMessageInfo, { type: "idle" }>
 
 type Status = {
   count: number
@@ -15,6 +16,7 @@ type Status = {
   running: boolean
   capped: boolean
   failed: boolean
+  elapsed: string
 }
 
 function isDone(text: string): boolean {
@@ -30,6 +32,33 @@ function lastUserIndex(messages: SessionMessageInfo[]): number {
     if (messages[i].type === "user") return i
   }
   return -1
+}
+
+function lastRealUserIndex(messages: SessionMessageInfo[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.type === "user" && !message.text.startsWith(CONTINUE_PREFIX)) return i
+  }
+  return -1
+}
+
+function lastIdleAfter(messages: SessionMessageInfo[], start: number): Idle | undefined {
+  for (let i = messages.length - 1; i > start; i--) {
+    const message = messages[i]
+    if (message.type === "idle") return message
+  }
+  return
+}
+
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
 }
 
 function lastAssistant(messages: SessionMessageInfo[]): Assistant | undefined {
@@ -51,15 +80,7 @@ function assistantText(message: Assistant | undefined): string {
 }
 
 function continuationCount(messages: SessionMessageInfo[]): number {
-  let lastRealUser = -1
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
-    if (message.type === "user" && !message.text.startsWith(CONTINUE_PREFIX)) {
-      lastRealUser = i
-      break
-    }
-  }
-
+  const lastRealUser = lastRealUserIndex(messages)
   let count = 0
   for (let i = lastRealUser + 1; i < messages.length; i++) {
     const message = messages[i]
@@ -71,7 +92,11 @@ function continuationCount(messages: SessionMessageInfo[]): number {
 function StatusView(props: { sessionID?: string }) {
   const ctx = usePlugin()
   const [version, setVersion] = createSignal(0)
+  const [now, setNow] = createSignal(Date.now())
   const [failures, setFailures] = createSignal<Record<string, true>>({})
+
+  const ticker = setInterval(() => setNow(Date.now()), 1000)
+  onCleanup(() => clearInterval(ticker))
 
   const bump = () => {
     // Let the client-side session store apply the event before we read it.
@@ -123,6 +148,7 @@ function StatusView(props: { sessionID?: string }) {
 
   const status = createMemo<Status | undefined>(() => {
     version()
+    const current = now()
     const sessionID = props.sessionID
     if (!sessionID) return
 
@@ -134,21 +160,45 @@ function StatusView(props: { sessionID?: string }) {
 
     const count = continuationCount(messages)
     const done = isDone(assistantText(assistant))
+    const running = ctx.data.session.status(sessionID) === "running"
 
     // Live failures come from events because a failed turn may not persist an
-    // idle message. Historical failures fall back to the assistant record.
-    // "aborted" is excluded here so a deliberate user abort stays quiet.
+    // idle message. Historical failures fall back to the assistant record and
+    // the trailing idle outcome. "aborted" is excluded from the assistant
+    // fallback so a deliberate user abort stays quiet.
     const historicalFailure =
       assistant?.error !== undefined
         ? assistant.error.type !== "aborted"
         : assistant?.finish === "error"
 
+    const realUser = lastRealUserIndex(messages)
+    const startIndex = realUser >= 0 ? realUser : lastUserIndex(messages)
+    const start = startIndex >= 0 ? messages[startIndex].time.created : undefined
+    const lastIdle = lastIdleAfter(messages, startIndex)
+    const failed = failures()[sessionID] === true || historicalFailure || lastIdle?.outcome === "failed"
+    const interrupted = lastIdle?.outcome === "interrupted" || assistant?.error?.type === "aborted"
+    const finished = done || failed || count >= MAX || interrupted
+
+    let end = current
+    if (finished && start !== undefined) {
+      end = start
+      for (let i = startIndex + 1; i < messages.length; i++) {
+        const message = messages[i]
+        if (message.type === "assistant") {
+          end = Math.max(end, message.time.completed ?? message.time.created)
+        } else if (message.type === "idle") {
+          end = Math.max(end, message.time.created)
+        }
+      }
+    }
+
     return {
       count,
       done,
-      running: ctx.data.session.status(sessionID) === "running",
+      running,
       capped: count >= MAX && !done,
-      failed: failures()[sessionID] === true || historicalFailure,
+      failed,
+      elapsed: start === undefined ? "" : formatDuration(end - start),
     }
   })
 
@@ -169,6 +219,9 @@ function StatusView(props: { sessionID?: string }) {
           <text fg={value().failed ? errorColor() : ctx.theme.text.muted}>
             {value().failed ? "!" : value().done ? "✓" : `${value().count}/${MAX}`}
           </text>
+          <Show when={value().elapsed}>
+            <text fg={ctx.theme.text.muted}>{value().elapsed}</text>
+          </Show>
         </box>
       )}
     </Show>

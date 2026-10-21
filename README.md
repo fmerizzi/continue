@@ -38,13 +38,18 @@ the right of the TPS meter:
 
 | Display | Meaning |
 | --- | --- |
-| `● 0/25` | Solver is generating (green dot) |
-| `● 3/25` | Waiting between continuations (yellow dot) |
-| `● ✓` | `JOB COMPLETED` reached (cyan dot) |
-| `● 25/25` | Continuation cap reached (red dot) |
-| `● !` | The last execution failed, or timed out from inactivity (red) |
+| `● 0/25 00:12` | Solver is generating (green dot) |
+| `● 3/25 07:42` | Waiting between continuations (yellow dot) |
+| `● ✓ 12:18` | `JOB COMPLETED` reached (cyan dot) |
+| `● 25/25 1:02:03` | Continuation cap reached (red dot) |
+| `● ! 04:51` | The last execution failed, or timed out from inactivity (red) |
 
 The status is hidden for every session that is not running the `solver` agent.
+
+The timer starts at the last real user task and includes all continuations and
+cooldowns. It freezes when the run stops (done, failed, interrupted, or capped)
+and resets when you start a new task. Because it is computed from message
+timestamps, it also works when you reopen an older session.
 
 ## Empty replies and failures
 

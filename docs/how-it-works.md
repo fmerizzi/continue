@@ -141,8 +141,13 @@ from the session data available to the TUI:
 - **Cap** — `count >= 25`.
 - **Failed** — `execution.failed` sets a live per-session flag;
   `execution.interrupted` sets it only for the `inactivity` reason. Historical
-  failures fall back to an assistant `error` or `finish === "error"`, except for
-  `aborted`, so a deliberate user abort stays quiet.
+  failures fall back to an assistant `error`, `finish === "error"`, or a failed
+  idle outcome, except for `aborted`, so a deliberate user abort stays quiet.
+- **Elapsed** — starts at the last real user task's `time.created`. While the
+  run is active it counts against `Date.now()` on a 1-second ticker; when done,
+  failed, interrupted, or capped it freezes at the last assistant
+  `time.completed` or idle `time.created`. The format is `MM:SS`, or
+  `H:MM:SS` past an hour.
 
 The component subscribes to execution, idle, inbox, agent, and status events and
 bumps a Solid signal so the footer refreshes after each transition. It registers
